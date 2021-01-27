@@ -1,8 +1,7 @@
 const mysql     = require('mysql');
 const https     = require('https');
 const fs        = require('fs');
-const url       = require('url');
-const progress  = require('cli-progress');
+const cliProgress  = require('cli-progress');
  
 var dbcon; 
 var sfcon;
@@ -17,56 +16,73 @@ async function run() {
         sfcon = await loginBySoap( credentials.sf ); 
 
         console.log( 'cleaning database');
-        await doQuery( `DELETE FROM baubles.resources where type = 'ApexClass'` );
-        await doQuery( 'DELETE FROM baubles.dependencies' );
+        let owner = await getResourceOwner();
+        await doQuery( `DELETE FROM baubles.resources` );
+        await doQuery( 'DELETE FROM baubles.resource_dependencies ' );
 
         console.log( 'fetching apex classes');
-        let res = await doToolingQuery( "SELECT Id, Name, Body FROM ApexClass WHERE NamespacePrefix = null" ); 
+        let res = await doToolingQuery( "SELECT Id, Name, Body, SymbolTable, CreatedDate, LastModifiedDate FROM ApexClass WHERE NamespacePrefix = null" ); 
+        let prog = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
+        prog.start(res.length, 0);        
         for( let i = 0; i< res.length; ++i ){
             var cls = res[i];
             var code = cls.Body;
             let attributes = new Array();
-            if( code.test( /@isTest\b/gmi ) ) attributes.push( 'is_test' );
-            if( code.test( /@AuraEnabled\b/gmi ) ) attributes.push( 'aura_enabled' );
-            if( code.test( /\binterface\b/gmi ) ) attributes.push( 'interface' );
-            if( code.test( /\bstatic class\b/gmi ) ) attributes.push( 'static_class' );
-            await doQuery( `INSERT INTO baubles.resources ( id, type, name, attributes ) VALUES ( '${cls.Id}', 'ApexClass', '${cls.Name}', '${attributes.join(', ')}' )` );
+            if( code.match( /@isTest\b/gmi ) ) attributes.push( 'is_test' );
+            if( code.match( /@AuraEnabled\b/gmi ) ) attributes.push( 'aura_enabled' );
+            if( code.match( /\binterface\b/gmi ) ) attributes.push( 'interface' );
+            if( code.match( /\bstatic class\b/gmi ) ) attributes.push( 'static_class' );
+            await doQuery( `INSERT INTO baubles.resources ( id, type, name, attributes, owner_id, created, updated ) 
+                            VALUES ( '${cls.Id}', 'ApexClass', '${cls.Name}', '${attributes.join(', ')}', '${owner.id}', '${convUTC( cls.CreatedDate )}', '${convUTC( cls.LastModifiedDate )}' )` );
+            prog.update(i);
         }
+        prog.stop();
 
         console.log( 'fetching apex components');
-        res = await doToolingQuery( "SELECT Id, Name FROM ApexComponent WHERE NamespacePrefix = null" ); 
+        res = await doToolingQuery( "SELECT Id, Name, CreatedDate, LastModifiedDate FROM ApexComponent WHERE NamespacePrefix = null" ); 
         for( let i = 0; i< res.length; ++i ){
             var cls = res[i];
-            await doQuery( `INSERT INTO baubles.resources ( id, type, name ) VALUES ( '${cls.Id}', 'ApexComponent', '${cls.Name}')` );
+            await doQuery( `INSERT INTO baubles.resources 
+                                ( id, type, name, owner_id, created, updated ) 
+                            VALUES 
+                                ( '${cls.Id}', 'ApexComponent', '${cls.Name}', '${owner.id}', '${convUTC( cls.CreatedDate )}', '${convUTC( cls.LastModifiedDate )}')` );
         }
 
         console.log( 'fetching aura definition bundles');
-        res = await doToolingQuery( "SELECT Id, DeveloperName FROM AuraDefinitionBundle WHERE NamespacePrefix = null" ); 
+        res = await doToolingQuery( "SELECT Id, DeveloperName, CreatedDate, LastModifiedDate FROM AuraDefinitionBundle WHERE NamespacePrefix = null" ); 
         for( let i = 0; i< res.length; ++i ){
             var cls = res[i];
-            await doQuery( `INSERT INTO baubles.resources ( id, type, name ) VALUES ( '${cls.Id}', 'AuraDefinitionBundle', '${cls.DeveloperName}')` );
+            await doQuery( `INSERT INTO baubles.resources 
+                                ( id, type, name, owner_id, created, updated ) 
+                            VALUES 
+                                ( '${cls.Id}', 'AuraDefinitionBundle', '${cls.DeveloperName}', '${owner.id}', '${convUTC( cls.CreatedDate )}', '${convUTC( cls.LastModifiedDate )}')` );
         }
 
         console.log( 'fetching static resources');
-        res = await doToolingQuery( "SELECT Id, Name FROM StaticResource WHERE NamespacePrefix = null" ); 
+        res = await doToolingQuery( "SELECT Id, Name, CreatedDate, LastModifiedDate FROM StaticResource WHERE NamespacePrefix = null" ); 
         for( let i = 0; i< res.length; ++i ){
             var cls = res[i];
-            await doQuery( `INSERT INTO baubles.resources ( id, type, name ) VALUES ( '${cls.Id}', 'StaticResource', '${cls.Name}')` );
+            await doQuery( `INSERT INTO baubles.resources 
+                                ( id, type, name, owner_id, created, updated ) 
+                            VALUES 
+                                ( '${cls.Id}', 'StaticResource', '${cls.Name}', '${owner.id}', '${convUTC( cls.CreatedDate )}', '${convUTC( cls.LastModifiedDate )}')` );
         }
 
-        console.log( 'fetching dependencies');
+        console.log( 'fetching resource_dependencies');
         let resources = await doQuery( `Select ID FROM baubles.resources`);
-        const prog = new cliProgress.SingleBar({}, cliProgress.Presets.shades_classic);
-        prog.start(ri.length, 0);        
+        prog.start(resources.length, 0);        
         for( let ri = 0; ri < resources.length; ++ri ){    
             prog.update(ri);
-            res = await doToolingQuery( `SELECT MetadataComponentId, MetadataComponentName, MetadataComponentType, RefMetadataComponentId, RefMetadataComponentName, RefMetadataComponentType 
+            res = await doToolingQuery( `SELECT MetadataComponentId, MetadataComponentName, MetadataComponentType, RefMetadataComponentId, RefMetadataComponentName, RefMetadataComponentType
                                                     FROM MetadataComponentDependency 
                                                     WHERE MetadataComponentId = '${resources[ri].ID}'
                                                        OR RefMetadataComponentId = '${resources[ri].ID}'`) ;
             for( let i = 0; i< res.length; ++i ){
                 var cmp = res[i];
-                await doQuery( `INSERT INTO baubles.dependencies ( resource_id, resource_name, resource_type, dependent_id, dependent_name, dependent_type ) VALUES ( '${cmp.MetadataComponentId}', '${cmp.MetadataComponentName}', '${cmp.MetadataComponentType}', '${cmp.RefMetadataComponentId}', '${cmp.RefMetadataComponentName}', '${cmp.RefMetadataComponentType}')` );
+                await doQuery( `INSERT INTO baubles.resource_dependencies 
+                                ( resource_id, resource_name, resource_type, dependent_id, dependent_name, dependent_type ) 
+                                VALUES 
+                                ( '${cmp.MetadataComponentId}', '${cmp.MetadataComponentName}', '${cmp.MetadataComponentType}', '${cmp.RefMetadataComponentId}', '${cmp.RefMetadataComponentName}', '${cmp.RefMetadataComponentType}')` );
             }
         }
         prog.stop();        
@@ -132,6 +148,27 @@ async function doQuery( query_string ){
             if (err) { reject( err ); }
             resolve( records );
         });
+    });
+}
+
+async function getResourceOwner(){
+    return new Promise( (resolve, reject) => { 
+        try {
+            dbcon.query( `select id, name from baubles.resource_owners where id = '${sfcon.organizationId}'`, (err, records) => { 
+                if (err) { reject( err ); }
+
+                if( !records || 0 == records.length ){
+                    dbcon.query( `insert into baubles.resource_owners ( id, name ) values ('${sfcon.organizationId}', '${sfcon.metaUrl}')`, (err, records) => { 
+                        if (err) { reject( err ); }
+                        resolve({ id: sfcon.organizationId, name: sfcon.metaUrl });
+                    });
+                } else {
+                    resolve( records[0] );
+                }
+            });
+        } catch( err ){
+            reject(err);
+        }
     });
 }
 
@@ -202,4 +239,8 @@ async function loginBySoap( {username, password, token, loginUrl}  ) {
         req.write(body);
         req.end();
     });  
+}
+
+function convUTC( utc ){
+    return utc && `${utc.match( /(.*)T/ )[1]} ${utc.match( /T(.*)\+/ )[1]}`;
 }
